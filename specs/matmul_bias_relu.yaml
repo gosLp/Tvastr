@@ -1,0 +1,99 @@
+name: matmul_bias_relu
+kind: tensor_op
+version: 1.0
+
+description: >
+  Fused matric multiplication, bias addition, and ReLU activation:
+  C = relu(A @ B + bias).
+
+inputs:
+  - name: A
+    type: tensor
+    shape: [M, K]
+    dtype: f16
+    memory: global
+    layout: row_major
+
+  - name: B
+    type: tensor
+    shape: [K, N]
+    dtype: f16
+    memory: global
+    layout: row_major
+
+  - name: bias
+    type: tensor
+    shape: [N]
+    dtype: f16
+    memory: global
+    layout: contiguous
+
+outputs:
+  - name: C
+    type: tensor
+    shape: [M, N]
+    dtype: f16
+    memory: global
+    layout: row_major
+
+semantics:
+  expression: "C[i,j] = relu(sum(k, A[i,k] * B[k,j]) + bias[j])"
+  reduction_axes:
+    - name: k
+      range: [0, K]
+  elementwise:
+    - bias_add
+    - relu
+
+constraints:
+  symbolic:
+    - "M > 0"
+    - "N > 0"
+    - "K > 0"
+    - "M % 16 == 0"
+    - "N % 16 == 0"
+    - "K % 16 == 0"
+  dtype:
+    - "A.dtype == f16"
+    - "B.dtype == f16"
+    - "bias.dtype == f16"
+    - "C.dtype == f16"
+  shape:
+    - "A.shape == [M, K]"
+    - "B.shape == [K, N]"
+    - "bias.shape == [N]"
+    - "C.shape == [M, N]"
+
+performance_contract:
+  no_intermediate_materialization: true
+  fusion_required:
+    - matmul
+    - bias_add
+    - relu
+  accumulation_dtype: f32
+  allowed_fast_math: false
+  memory_expectations:
+    - "A and B loads should be tiled"
+    - "bias should be loaded once per output column tile"
+    - "C should be written once"
+
+schedule_space:
+  parameters:
+    BLOCK_M: [16, 32, 64]
+    BLOCK_N: [16, 32, 64]
+    BLOCK_K: [16, 32, 64]
+    num_warps: [4, 8]
+    num_stages: [3, 4]
+
+lowering:
+  backend: triton
+  template: triton_matmul_bias_relu.py.j2
+
+testing:
+  reference: torch
+  atol: 0.01
+  rtol: 0.01
+  shapes:
+    - {M: 256, N: 256, K: 256}
+    - {M: 1024, N: 1024, K: 1024}
+    - {M: 4096, N: 4096, K: 4096}

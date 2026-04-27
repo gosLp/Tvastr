@@ -1,0 +1,15 @@
+[project]
+name = "Tvastr"
+version = "0.1.0"
+description = "Contract DSL generator for ML/HPC kernels"
+requires-python = ">=3.10"
+dependencies = [
+  "pyyaml",
+  "jinja2",
+  "pytest",
+  "torch",
+  "triton"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
