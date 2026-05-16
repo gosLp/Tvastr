@@ -1,9 +1,9 @@
 name: matmul_bias_relu
 kind: tensor_op
-version: 1.0
+version: 0.1
 
 description: >
-  Fused matric multiplication, bias addition, and ReLU activation:
+  Fused matrix multiplication, bias addition, and ReLU activation:
   C = relu(A @ B + bias).
 
 inputs:
