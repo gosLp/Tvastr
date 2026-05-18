@@ -9,6 +9,8 @@ from tvastr.validate import validate_spec
 from tvastr.generators.schedule_gen import generate_schedules
 from tvastr.generators.reference_gen import generate_reference
 from tvastr.generators.verifier_gen import generate_verifier
+from tvastr.generators.triton_gen import generate_triton
+from tvastr.generators.run_gen import generate_run
 
 
 def generate_cmd(args: argparse.Namespace) -> None: 
@@ -23,17 +25,22 @@ def generate_cmd(args: argparse.Namespace) -> None:
         json.dump(asdict(spec), f, indent=2)
     
     template_dir = Path(__file__).parent / "templates"
-    generate_reference(spec, template_dir, out_dir)
 
     schedules = generate_schedules(spec, out_dir)
 
+    generate_reference(spec, template_dir, out_dir)
     generate_verifier(spec, template_dir, out_dir)
-    print(f"[ok] generated: {out_dir / 'verifier.py'}")
-    print(f"[ok] generated: {out_dir / 'reference.py'}")
+    generate_triton(spec, template_dir, out_dir)
+    generate_run(spec, template_dir, out_dir)
+
     print(f"[ok] parsed: {spec.name}")
     print(f"[ok] backend: {spec.lowering.backend}")
-    print(f"[ok] generated: {out_dir / 'contract.json'}")
+    print(f"[ok] generated: {out_dir / 'spec.json'}")
     print(f"[ok] generated: {out_dir / 'schedules.json'}")
+    print(f"[ok] generated: {out_dir / 'reference.py'}")
+    print(f"[ok] generated: {out_dir / 'verifier.py'}")
+    print(f"[ok] generated: {out_dir / 'kernel_triton.py'}")
+    print(f"[ok] generated: {out_dir / 'run.py'}")
     print(f"[ok] schedules: {len(schedules)}")
 
 def main():

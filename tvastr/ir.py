@@ -5,8 +5,8 @@ from typing import Any
 @dataclass(frozen=True)
 class TensorSpec:
     name: str
-    shape: list[str]
-    dtype: str
+    shape: list[str] = field(default_factory=list)
+    dtype: str = "f32"
     type: str = "tensor"
     memory: str = "global"
     layout: str = "row_major"

@@ -7,6 +7,8 @@ venv/
 hopper/
 .venv/
 env/
+*.txt
+!requirements.txt
 
 # Generated outputs (runtime artifacts, not source)
 generated/

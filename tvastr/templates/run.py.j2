@@ -1,0 +1,145 @@
+import argparse
+import sys
+from pathlib import Path
+
+import torch
+import triton
+
+_THIS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(_THIS_DIR))
+
+from verifier import verify
+from reference import reference
+from kernel_triton import matmul_bias_relu
+
+
+ATOL = {{ spec.testing.atol }}
+RTOL = {{ spec.testing.rtol }}
+
+TEST_SHAPES = {{ spec.testing.shapes }}
+
+DEFAULT_BLOCK_M = {{ default_config["BLOCK_M"] }}
+DEFAULT_BLOCK_N = {{ default_config["BLOCK_N"] }}
+DEFAULT_BLOCK_K = {{ default_config["BLOCK_K"] }}
+DEFAULT_NUM_WARPS = {{ default_config["num_warps"] }}
+DEFAULT_NUM_STAGES = {{ default_config["num_stages"] }}
+
+
+def verify_output(C, M, N):
+    if C.ndim != 2:
+        raise ValueError(f"C must be rank-2, got rank {C.ndim}")
+
+    if tuple(C.shape) != (M, N):
+        raise ValueError(f"C shape must be {(M, N)}, got {tuple(C.shape)}")
+
+    if C.dtype != torch.float16:
+        raise ValueError(f"C must be torch.float16, got {C.dtype}")
+
+
+def make_inputs(M, N, K):
+    A = torch.randn((M, K), device="cuda", dtype=torch.float16)
+    B = torch.randn((K, N), device="cuda", dtype=torch.float16)
+    bias = torch.randn((N,), device="cuda", dtype=torch.float16)
+    return A, B, bias
+
+
+def run_case(M, N, K, args):
+    print(f"[shape] M={M} N={N} K={K}")
+
+    A, B, bias = make_inputs(M, N, K)
+
+    dims = verify(A, B, bias)
+    print(f"[verify inputs] ok {dims}")
+
+    C_ref = reference(A, B, bias)
+    verify_output(C_ref, M, N)
+    print("[reference] ok")
+
+    C_tri = matmul_bias_relu(
+        A,
+        B,
+        bias,
+        BLOCK_M=args.BLOCK_M,
+        BLOCK_N=args.BLOCK_N,
+        BLOCK_K=args.BLOCK_K,
+        num_warps=args.num_warps,
+        num_stages=args.num_stages,
+    )
+
+    verify_output(C_tri, M, N)
+    print("[triton output] ok")
+
+    max_abs_error = (C_ref.float() - C_tri.float()).abs().max().item()
+    is_close = torch.allclose(C_ref, C_tri, atol=ATOL, rtol=RTOL)
+
+    print(f"[correctness] {is_close}")
+    print(f"[max abs error] {max_abs_error:.6f}")
+
+    if not is_close:
+        raise RuntimeError("Triton output does not match reference")
+
+    torch.cuda.synchronize()
+
+    triton_ms = triton.testing.do_bench(
+        lambda: matmul_bias_relu(
+            A,
+            B,
+            bias,
+            BLOCK_M=args.BLOCK_M,
+            BLOCK_N=args.BLOCK_N,
+            BLOCK_K=args.BLOCK_K,
+            num_warps=args.num_warps,
+            num_stages=args.num_stages,
+        ),
+        warmup=25,
+        rep=100,
+        return_mode="median",
+    )
+
+    torch_ms = triton.testing.do_bench(
+        lambda: torch.relu(torch.matmul(A, B) + bias),
+        warmup=25,
+        rep=100,
+        return_mode="median",
+    )
+
+    print(f"[torch ms] {torch_ms:.4f}")
+    print(f"[tvastr triton ms] {triton_ms:.4f}")
+    print(
+        "[config] "
+        f"BLOCK_M={args.BLOCK_M} "
+        f"BLOCK_N={args.BLOCK_N} "
+        f"BLOCK_K={args.BLOCK_K} "
+        f"num_warps={args.num_warps} "
+        f"num_stages={args.num_stages}"
+    )
+    print()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--M", type=int, default=None)
+    parser.add_argument("--N", type=int, default=None)
+    parser.add_argument("--K", type=int, default=None)
+
+    parser.add_argument("--BLOCK_M", type=int, default=DEFAULT_BLOCK_M)
+    parser.add_argument("--BLOCK_N", type=int, default=DEFAULT_BLOCK_N)
+    parser.add_argument("--BLOCK_K", type=int, default=DEFAULT_BLOCK_K)
+    parser.add_argument("--num_warps", type=int, default=DEFAULT_NUM_WARPS)
+    parser.add_argument("--num_stages", type=int, default=DEFAULT_NUM_STAGES)
+
+    args = parser.parse_args()
+
+    if args.M is not None or args.N is not None or args.K is not None:
+        if args.M is None or args.N is None or args.K is None:
+            raise ValueError("Provide all of --M, --N, and --K together")
+        shapes = [{"M": args.M, "N": args.N, "K": args.K}]
+    else:
+        shapes = TEST_SHAPES
+
+    for shape in shapes:
+        run_case(shape["M"], shape["N"], shape["K"], args)
+
+
+if __name__ == "__main__":
+    main()
