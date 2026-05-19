@@ -16,6 +16,7 @@ from tvastr.generators.mlir_stub_gen import generate_mlir_stub
 from tvastr.generators.rewrite_guards_gen import generate_rewrite_guards
 from tvastr.generators.mlir_stub_gen import generate_mlir_stub
 from tvastr.generators.layout_gen import generate_layout_artifacts
+from tvastr.generators.lowering_plan_gen import generate_lowering_plan
 
 
 def generate_cmd(args: argparse.Namespace) -> None: 
@@ -41,6 +42,8 @@ def generate_cmd(args: argparse.Namespace) -> None:
     generate_rewrite_guards(spec, template_dir, out_dir)
     generate_mlir_stub(spec, template_dir, out_dir)
     generate_layout_artifacts(spec, template_dir, out_dir)
+    generate_lowering_plan(spec, out_dir)
+
 
     print(f"[ok] parsed: {spec.name}")
     print(f"[ok] backend: {spec.lowering.backend}")
@@ -58,7 +61,7 @@ def generate_cmd(args: argparse.Namespace) -> None:
     print(f"[ok] generated: {out_dir / 'schedule_rank_report.json'}")
     print(f"[ok] generated: {out_dir / 'layout_guards.py'}")
     print(f"[ok] generated: {out_dir / 'layout_report.json'}")
-
+    print(f"[ok] generated: {out_dir / 'lowering_plan.json'}")
 
 def main():
     parser = argparse.ArgumentParser(prog="tvastr")
