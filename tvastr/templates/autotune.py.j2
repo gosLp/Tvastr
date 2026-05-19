@@ -1,0 +1,226 @@
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import torch
+import triton
+
+_THIS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(_THIS_DIR))
+
+from verifier import verify
+from reference import reference
+from kernel_triton import matmul_bias_relu
+
+
+ATOL = {{ spec.testing.atol }}
+RTOL = {{ spec.testing.rtol }}
+
+
+def make_inputs(M, N, K):
+    A = torch.randn((M, K), device="cuda", dtype=torch.float16)
+    B = torch.randn((K, N), device="cuda", dtype=torch.float16)
+    bias = torch.randn((N,), device="cuda", dtype=torch.float16)
+    return A, B, bias
+
+
+def verify_output(C, M, N):
+    if C.ndim != 2:
+        raise ValueError(f"C must be rank-2, got rank {C.ndim}")
+
+    if tuple(C.shape) != (M, N):
+        raise ValueError(f"C shape must be {(M, N)}, got {tuple(C.shape)}")
+
+    if C.dtype != torch.float16:
+        raise ValueError(f"C must be torch.float16, got {C.dtype}")
+
+
+def normalize_config(config):
+    return {
+        "BLOCK_M": int(config["BLOCK_M"]),
+        "BLOCK_N": int(config["BLOCK_N"]),
+        "BLOCK_K": int(config["BLOCK_K"]),
+        "num_warps": int(config["num_warps"]),
+        "num_stages": int(config["num_stages"]),
+    }
+
+
+def run_kernel(A, B, bias, config):
+    return matmul_bias_relu(
+        A,
+        B,
+        bias,
+        BLOCK_M=config["BLOCK_M"],
+        BLOCK_N=config["BLOCK_N"],
+        BLOCK_K=config["BLOCK_K"],
+        num_warps=config["num_warps"],
+        num_stages=config["num_stages"],
+    )
+
+
+def benchmark_config(A, B, bias, config, warmup, rep):
+    # First call triggers Triton JIT compilation for this constexpr config.
+    C = run_kernel(A, B, bias, config)
+    torch.cuda.synchronize()
+
+    ms = triton.testing.do_bench(
+        lambda: run_kernel(A, B, bias, config),
+        warmup=warmup,
+        rep=rep,
+        return_mode="median",
+    )
+
+    return ms, C
+
+
+def benchmark_torch(A, B, bias, warmup, rep):
+    torch.cuda.synchronize()
+    return triton.testing.do_bench(
+        lambda: torch.relu(torch.matmul(A, B) + bias),
+        warmup=warmup,
+        rep=rep,
+        return_mode="median",
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--M", type=int, required=True)
+    parser.add_argument("--N", type=int, required=True)
+    parser.add_argument("--K", type=int, required=True)
+
+    parser.add_argument("--max-configs", type=int, default=None)
+    parser.add_argument("--warmup", type=int, default=10)
+    parser.add_argument("--rep", type=int, default=30)
+    parser.add_argument("--fail-fast", action="store_true")
+
+    args = parser.parse_args()
+
+    M, N, K = args.M, args.N, args.K
+
+    schedules_path = _THIS_DIR / "schedules.json"
+    with schedules_path.open("r") as f:
+        schedules = json.load(f)
+
+    if args.max_configs is not None:
+        schedules = schedules[: args.max_configs]
+
+    print(f"[autotune] op={{ spec.name }}")
+    print(f"[autotune] shape M={M} N={N} K={K}")
+    print(f"[autotune] configs={len(schedules)}")
+    print()
+
+    A, B, bias = make_inputs(M, N, K)
+
+    dims = verify(A, B, bias)
+    print(f"[verify inputs] ok {dims}")
+
+    C_ref = reference(A, B, bias)
+    verify_output(C_ref, M, N)
+    print("[reference] ok")
+
+    torch_ms = benchmark_torch(A, B, bias, args.warmup, args.rep)
+    print(f"[torch ms] {torch_ms:.4f}")
+    print()
+
+    results = []
+    best = None
+
+    for idx, raw_config in enumerate(schedules, start=1):
+        config = normalize_config(raw_config)
+
+        prefix = (
+            f"[config {idx}/{len(schedules)}] "
+            f"BM={config['BLOCK_M']} "
+            f"BN={config['BLOCK_N']} "
+            f"BK={config['BLOCK_K']} "
+            f"warps={config['num_warps']} "
+            f"stages={config['num_stages']}"
+        )
+
+        try:
+            ms, C = benchmark_config(A, B, bias, config, args.warmup, args.rep)
+            verify_output(C, M, N)
+
+            max_abs_error = (C_ref.float() - C.float()).abs().max().item()
+            correct = torch.allclose(C_ref.float(), C.float(), atol=ATOL, rtol=RTOL)
+
+            result = {
+                "index": idx,
+                "config": config,
+                "ms": float(ms),
+                "correct": bool(correct),
+                "max_abs_error": float(max_abs_error),
+            }
+
+            results.append(result)
+
+            status = "ok" if correct else "bad"
+            print(f"{prefix} -> {ms:.4f} ms correctness={status} max_abs={max_abs_error:.6f}")
+
+            if correct and (best is None or ms < best["ms"]):
+                best = result
+
+            if not correct and args.fail_fast:
+                raise RuntimeError("incorrect output")
+
+        except Exception as e:
+            result = {
+                "index": idx,
+                "config": config,
+                "ms": None,
+                "correct": False,
+                "error": str(e),
+            }
+            results.append(result)
+            print(f"{prefix} -> error: {e}")
+
+            if args.fail_fast:
+                raise
+
+    if best is None:
+        raise RuntimeError("No correct Triton configuration found")
+
+    best_config_path = _THIS_DIR / f"best_config_{M}x{N}x{K}.json"
+    report_path = _THIS_DIR / f"autotune_report_{M}x{N}x{K}.json"
+
+    with best_config_path.open("w") as f:
+        json.dump(best["config"], f, indent=2)
+
+    torch_ms_after = benchmark_torch(A, B, bias, args.warmup, args.rep)
+
+    torch_ms_stable = min(float(torch_ms), float(torch_ms_after))
+
+    report = {
+        "op": "{{ spec.name }}",
+        "shape": {"M": M, "N": N, "K": K},
+        "torch_ms_before": float(torch_ms),
+        "torch_ms_after": float(torch_ms_after),
+        "torch_ms_stable_min": float(torch_ms_stable),
+        "best_ms": float(best["ms"]),
+        "best_config": best["config"],
+        "best_max_abs_error": float(best["max_abs_error"]),
+        "num_configs": len(schedules),
+        "num_correct": sum(1 for r in results if r.get("correct")),
+        "results": results,
+    }
+
+    with report_path.open("w") as f:
+        json.dump(report, f, indent=2)
+
+    print()
+    print("[best]")
+    print(json.dumps(best["config"], indent=2))
+    print(f"[best ms] {best['ms']:.4f}")
+    print(f"[torch ms] {torch_ms:.4f}")
+    print(f"[torch ms before] {torch_ms:.4f}")
+    print(f"[torch ms after] {torch_ms_after:.4f}")
+    print(f"[torch ms stable min] {torch_ms_stable:.4f}")
+    print(f"[speedup vs torch stable min] {torch_ms_stable / best['ms']:.3f}x")
+    print(f"[saved] {best_config_path}")
+    print(f"[saved] {report_path}")
+
+
+if __name__ == "__main__":
+    main()

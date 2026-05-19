@@ -64,6 +64,65 @@ constraints:
     - "bias.shape == [N]"
     - "C.shape == [M, N]"
 
+layouts:
+  row_major_2d:
+    rank: 2
+    mapping: "offset(i,j) = i * stride_0 + j * stride_1"
+    required_properties:
+      - contiguous_last_dim
+      - dense
+    notes:
+      - "For a contiguous row-major tensor, stride_1 == 1."
+
+  contiguous_1d:
+    rank: 1
+    mapping: "offset(i) = i"
+    required_properties:
+      - dense
+      - contiguous
+
+layout_contract:
+  tensors:
+    A:
+      layout: row_major_2d
+      required_properties:
+        - contiguous_last_dim
+        - dense
+    B:
+      layout: row_major_2d
+      required_properties:
+        - contiguous_last_dim
+        - dense
+    bias:
+      layout: contiguous_1d
+      required_properties:
+        - contiguous
+    C:
+      layout: row_major_2d
+      required_properties:
+        - contiguous_last_dim
+        - dense
+
+  backend_assumptions:
+    triton:
+      - "A.stride(1) == 1"
+      - "B.stride(1) == 1"
+      - "bias.is_contiguous()"
+      - "C is allocated contiguous row-major"
+
+layout_transforms:
+  - name: global_row_major_to_blocked_tile
+    from: row_major_2d
+    to: blocked_tile_2d
+    applies_to: [A, B]
+    parameters:
+      tile_m: BLOCK_M
+      tile_n_or_k: BLOCK_K
+    legal_if:
+      - "tensor.layout == row_major_2d"
+      - "BLOCK_M % 16 == 0"
+      - "BLOCK_K % 16 == 0"
+
 performance_contract:
   no_intermediate_materialization: true
   fusion_required:
@@ -79,11 +138,27 @@ performance_contract:
 
 schedule_space:
   parameters:
-    BLOCK_M: [16, 32, 64]
-    BLOCK_N: [16, 32, 64]
-    BLOCK_K: [16, 32, 64]
+    BLOCK_M: [16, 32, 64, 128]
+    BLOCK_N: [16, 32, 64, 128]
+    BLOCK_K: [32, 64]
     num_warps: [4, 8]
-    num_stages: [3, 4]
+    num_stages: [3, 4, 5]
+  constraints:
+    - "BLOCK_M * BLOCK_N >= 4096"
+    - "BLOCK_M * BLOCK_N <= 16384"
+    - "BLOCK_K in [32, 64]"
+
+rewrites:
+  - name: fuse_matmul_bias_relu
+    from: [matmul, bias_add, relu]
+    to: matmul_bias_relu
+    legal_if:
+      - "performance_contract.no_intermediate_materialization == true"
+      - "performance_contract.allowed_fast_math == false"
+      - "'matmul' in performance_contract.fusion_required"
+      - "'bias_add' in performance_contract.fusion_required"
+      - "'relu' in performance_contract.fusion_required"
+
 
 lowering:
   backend: triton

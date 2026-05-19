@@ -11,6 +11,7 @@ sys.path.insert(0, str(_THIS_DIR))
 from verifier import verify
 from reference import reference
 from kernel_triton import matmul_bias_relu
+from layout_guards import verify_layouts
 
 
 ATOL = {{ spec.testing.atol }}
@@ -50,6 +51,9 @@ def run_case(M, N, K, args):
 
     dims = verify(A, B, bias)
     print(f"[verify inputs] ok {dims}")
+
+    layout_info = verify_layouts(A, B, bias)
+    print(f"[verify layouts] ok {layout_info['checked_tensors']}")
 
     C_ref = reference(A, B, bias)
     verify_output(C_ref, M, N)

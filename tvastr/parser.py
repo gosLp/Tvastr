@@ -6,36 +6,41 @@ from tvastr.ir import (
     ScheduleSpace,
     LoweringSpec,
     TestingSpec,
-    OpSpec
+    RewriteSpec,
+    OpSpec,
 )
+
+
+def _parse_tensor(x: dict) -> TensorSpec:
+    return TensorSpec(
+        name=x["name"],
+        type=x.get("type", "tensor"),
+        shape=x["shape"],
+        dtype=x["dtype"],
+        memory=x.get("memory", "global"),
+        layout=x.get("layout", "row_major"),
+    )
+
 
 def parse_spec(path: str | Path) -> OpSpec:
     path = Path(path)
+
     with path.open("r") as f:
         data = yaml.safe_load(f)
-    
-    inputs = [
-        TensorSpec(
-            name=x["name"],
-            type=x.get("type", "tensor"),
-            shape=x["shape"],
-            dtype=x["dtype"],
-            memory=x.get("memory", "global"),
-            layout=x.get("layout", "row_major"),
-        )
-        for x in data.get("inputs", [])
-    ]
 
-    outputs = [
-        TensorSpec(
+    inputs = [_parse_tensor(x) for x in data.get("inputs", [])]
+    outputs = [_parse_tensor(x) for x in data.get("outputs", [])]
+
+    schedule_data = data.get("schedule_space", {})
+
+    rewrites = [
+        RewriteSpec(
             name=x["name"],
-            type=x.get("type", "tensor"),
-            shape=x["shape"],
-            dtype=x["dtype"],
-            memory=x.get("memory", "global"),
-            layout=x.get("layout", "row_major"),
+            from_ops=x.get("from", []),
+            to=x["to"],
+            legal_if=x.get("legal_if", []),
         )
-        for x in data.get("outputs", [])
+        for x in data.get("rewrites", [])
     ]
 
     return OpSpec(
@@ -49,7 +54,8 @@ def parse_spec(path: str | Path) -> OpSpec:
         constraints=data.get("constraints", {}),
         performance_contract=data.get("performance_contract", {}),
         schedule_space=ScheduleSpace(
-            parameters=data.get("schedule_space", {}).get("parameters", {})
+            parameters=schedule_data.get("parameters", {}),
+            constraints=schedule_data.get("constraints", []),
         ),
         lowering=LoweringSpec(
             backend=data["lowering"]["backend"],
@@ -61,5 +67,8 @@ def parse_spec(path: str | Path) -> OpSpec:
             rtol=float(data.get("testing", {}).get("rtol", 1e-2)),
             shapes=data.get("testing", {}).get("shapes", []),
         ),
+        rewrites=rewrites,
+        layouts=data.get("layouts", {}),
+        layout_contract=data.get("layout_contract", {}),
+        layout_transforms=data.get("layout_transforms", []),
     )
-    

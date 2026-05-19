@@ -15,6 +15,7 @@ class TensorSpec:
 @dataclass(frozen=True)
 class ScheduleSpace:
     parameters: dict[str, list[Any]] = field(default_factory=dict)
+    constraints: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,13 @@ class TestingSpec:
     atol: float = 1e-2
     rtol: float = 1e-2
     shapes: list[dict[str, int]] = field(default_factory=list)
+
+@dataclass(frozen=True)
+class RewriteSpec:
+    name: str
+    from_ops: list[str]
+    to: str
+    legal_if: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -45,3 +53,7 @@ class OpSpec:
     schedule_space: ScheduleSpace
     lowering: LoweringSpec
     testing: TestingSpec
+    rewrites: list[RewriteSpec] = field(default_factory=list)
+    layouts: dict[str, Any] = field(default_factory=dict)
+    layout_contract: dict[str, Any] = field(default_factory=dict)
+    layout_transforms: list[dict[str, Any]] = field(default_factory=list)

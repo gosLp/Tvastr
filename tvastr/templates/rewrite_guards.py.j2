@@ -1,0 +1,140 @@
+import ast
+import json
+import re
+from types import SimpleNamespace
+
+
+PERFORMANCE_CONTRACT = json.loads(r'''{{ spec.performance_contract | tojson }}''')
+
+REWRITES = json.loads(r'''[
+{% for rw in spec.rewrites %}
+    {
+        "name": {{ rw.name | tojson }},
+        "from": {{ rw.from_ops | tojson }},
+        "to": {{ rw.to | tojson }},
+        "legal_if": {{ rw.legal_if | tojson }}
+    }{% if not loop.last %},{% endif %}
+{% endfor %}
+]''')
+
+
+_ALLOWED_AST_NODES = (
+    ast.Expression,
+    ast.BoolOp,
+    ast.UnaryOp,
+    ast.Compare,
+    ast.Name,
+    ast.Load,
+    ast.Constant,
+    ast.List,
+    ast.Tuple,
+    ast.Attribute,
+    ast.And,
+    ast.Or,
+    ast.Not,
+    ast.Eq,
+    ast.NotEq,
+    ast.Lt,
+    ast.LtE,
+    ast.Gt,
+    ast.GtE,
+    ast.In,
+    ast.NotIn,
+)
+
+
+def _to_namespace(x):
+    if isinstance(x, dict):
+        return SimpleNamespace(**{k: _to_namespace(v) for k, v in x.items()})
+    if isinstance(x, list):
+        return [_to_namespace(v) for v in x]
+    return x
+
+
+def _normalize_expr(expr: str) -> str:
+    expr = re.sub(r"\btrue\b", "True", expr)
+    expr = re.sub(r"\bfalse\b", "False", expr)
+    expr = re.sub(r"\bnull\b", "None", expr)
+    return expr
+
+
+def _safe_eval(expr: str, env: dict) -> bool:
+    expr = _normalize_expr(expr)
+    tree = ast.parse(expr, mode="eval")
+
+    for node in ast.walk(tree):
+        if not isinstance(node, _ALLOWED_AST_NODES):
+            raise ValueError(f"Unsupported expression in rewrite guard: {expr}")
+
+        if isinstance(node, ast.Name):
+            if node.id not in env and node.id not in {"True", "False", "None"}:
+                raise ValueError(f"Unknown name {node.id!r} in rewrite guard: {expr}")
+
+    return bool(
+        eval(
+            compile(tree, "<rewrite-guard>", "eval"),
+            {"__builtins__": {}},
+            env,
+        )
+    )
+
+
+def check_rewrite(rewrite: dict) -> dict:
+    env = {
+        "performance_contract": _to_namespace(PERFORMANCE_CONTRACT),
+    }
+
+    checks = []
+
+    for expr in rewrite["legal_if"]:
+        try:
+            passed = _safe_eval(expr, env)
+            checks.append(
+                {
+                    "expr": expr,
+                    "passed": passed,
+                    "error": None,
+                }
+            )
+        except Exception as e:
+            checks.append(
+                {
+                    "expr": expr,
+                    "passed": False,
+                    "error": str(e),
+                }
+            )
+
+    legal = all(x["passed"] for x in checks)
+
+    return {
+        "name": rewrite["name"],
+        "from": rewrite["from"],
+        "to": rewrite["to"],
+        "legal": legal,
+        "checks": checks,
+    }
+
+
+def main():
+    results = [check_rewrite(rw) for rw in REWRITES]
+
+    for result in results:
+        value = "true" if result["legal"] else "false"
+        print(f"[rewrite] {result['name']} legal: {value}")
+
+        if not result["legal"]:
+            for check in result["checks"]:
+                if not check["passed"]:
+                    print(f"  failed: {check['expr']}")
+                    if check["error"]:
+                        print(f"  error: {check['error']}")
+
+    with open("rewrite_report.json", "w") as f:
+        json.dump(results, f, indent=2)
+
+    print("[saved] rewrite_report.json")
+
+
+if __name__ == "__main__":
+    main()
